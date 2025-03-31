@@ -1,5 +1,4 @@
 fastapi
 uvicorn
 python-docx
-yt_dlp
-yt_transcript_api
+youtube_transcript_api
