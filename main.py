@@ -1,13 +1,16 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 import os
+from scrape import get_transcripts, create_doc
 
 app = FastAPI()
 
-# Configure CORS
+# ✅ Allow requests from your frontend domain
 origins = [
-    "http://localhost:3000",  # Local development
-    "https://your-frontend-app.vercel.app",  # Deployed frontend
+    "https://yt-transcript-app-delta.vercel.app",  # your frontend
+    "http://localhost:3000",  # for local dev
 ]
 
 app.add_middleware(
@@ -18,13 +21,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
+class ScrapeRequest(BaseModel):
+    url: str
 
-# Additional route definitions...
+@app.post("/scrape")
+async def scrape_endpoint(payload: ScrapeRequest):
+    url = payload.url
+    try:
+        videos = get_transcripts(url)
+        if not videos:
+            return {"status": "no_transcripts"}
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+        filename = create_doc(videos)
+        return {
+            "status": "success",
+            "file": filename,
+            "count": len(videos)
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/files/{filename}")
+async def download_file(filename: str):
+    filepath = os.path.join("files", filename)
+    if os.path.exists(filepath):
+        return FileResponse(filepath, filename=filename)
+    return {"error": "File not found"}
