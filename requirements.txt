@@ -1,7 +1,4 @@
 fastapi
 uvicorn
-python-docx
-google-api-python-client
-yt-dlp
 pydantic
-aiohttp
+python-multipart
