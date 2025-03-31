@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+python-docx
+youtube-transcript-api
+google-api-python-client
+python-multipart
