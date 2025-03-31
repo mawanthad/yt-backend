@@ -1,6 +1,4 @@
-fastapi
-uvicorn
-python-docx
-youtube-transcript-api
-google-api-python-client
-python-multipart
+fastapi==0.95.1
+uvicorn==0.22.0
+python-multipart==0.0.5
+pydantic==1.10.7
