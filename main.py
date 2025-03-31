@@ -1,16 +1,13 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-import os
-from scrape import get_transcripts, create_doc
+from scrape import get_transcript
 
 app = FastAPI()
 
-# ✅ Allow requests from your frontend domain
+# Configure CORS
 origins = [
-    "https://yt-transcript-app-delta.vercel.app",  # your frontend
-    "http://localhost:3000",  # for local dev
+    "http://localhost:3000",  # Adjust based on your frontend's URL
+    "https://your-frontend-domain.com",
 ]
 
 app.add_middleware(
@@ -21,29 +18,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class ScrapeRequest(BaseModel):
-    url: str
-
-@app.post("/scrape")
-async def scrape_endpoint(payload: ScrapeRequest):
-    url = payload.url
+@app.get("/transcript/")
+async def fetch_transcript(video_url: str = Query(..., title="YouTube Video URL")):
+    """
+    Endpoint to fetch the transcript of a YouTube video given its URL.
+    """
+    # Extract video ID from the URL
     try:
-        videos = get_transcripts(url)
-        if not videos:
-            return {"status": "no_transcripts"}
+        video_id = video_url.split("v=")[1].split("&")[0]
+    except IndexError:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL format.")
 
-        filename = create_doc(videos)
-        return {
-            "status": "success",
-            "file": filename,
-            "count": len(videos)
-        }
+    try:
+        transcript = get_transcript(video_id)
+        return {"transcript": transcript}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.get("/files/{filename}")
-async def download_file(filename: str):
-    filepath = os.path.join("files", filename)
-    if os.path.exists(filepath):
-        return FileResponse(filepath, filename=filename)
-    return {"error": "File not found"}
+        raise HTTPException(status_code=500, detail=str(e))
