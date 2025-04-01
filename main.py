@@ -1,18 +1,21 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
-import yt_dlp
+from youtube_transcript_api import YouTubeTranscriptApi
+from googleapiclient.discovery import build
+from docx import Document
+import locale
 import uuid
 import os
-import time
-from docx import Document
+
+locale.setlocale(locale.LC_ALL, '')
+API_KEY = "YOUR_API_KEY_HERE"  # Replace this in production
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # restrict this in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -24,82 +27,101 @@ os.makedirs(FILES_DIR, exist_ok=True)
 class ScrapeRequest(BaseModel):
     url: str
 
-@app.post("/scrape")
-async def scrape_transcripts(data: ScrapeRequest):
-    input_url = data.url.strip()
+def resolve_channel_id(input_url):
+    youtube = build('youtube', 'v3', developerKey=API_KEY)
 
-    # Allow @handles or channel links
-    if not input_url.startswith("http"):
-        input_url = f"ytsearch3:{input_url}"
-    elif "watch?v=" in input_url:
-        input_url = input_url  # video URL
-    else:
-        input_url = f"ytsearch3:{input_url}"
+    if "/channel/" in input_url:
+        return input_url.split("/")[-1]
 
-    print(f"🔍 Searching via yt_dlp: {input_url}")
+    identifier = input_url.strip('/').split('/')[-1].replace('@', '')
 
-    ydl_opts = {
-        "quiet": True,
-        "extract_flat": True,
-        "skip_download": True,
-    }
+    request = youtube.search().list(
+        part="snippet",
+        q=identifier,
+        type="channel",
+        maxResults=1
+    )
+    response = request.execute()
+    if not response['items']:
+        return None
+    return response['items'][0]['snippet']['channelId']
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(input_url, download=False)
-            videos = info.get("entries", [])
-    except Exception as e:
-        return {"status": "error", "message": f"Failed to get videos: {str(e)}"}
+def get_videos(channel_id, max_results=10):
+    youtube = build('youtube', 'v3', developerKey=API_KEY)
+    request = youtube.search().list(
+        part="snippet",
+        channelId=channel_id,
+        maxResults=max_results,
+        order="date"
+    )
+    response = request.execute()
 
-    if not videos:
-        return {"status": "error", "message": "No videos found."}
-
-    results = []
-
-    for video in videos[:3]:  # limit to 3 for now
-        vid = video.get("id")
-        title = video.get("title", "Untitled")
-
-        try:
-            transcript = YouTubeTranscriptApi.get_transcript(vid)
-            results.append({
-                "title": title,
-                "url": f"https://youtube.com/watch?v={vid}",
-                "transcript": transcript
+    videos = []
+    for item in response['items']:
+        if item['id']['kind'] == 'youtube#video':
+            video_id = item['id']['videoId']
+            stats = youtube.videos().list(part="statistics", id=video_id).execute()
+            views = stats['items'][0]['statistics'].get('viewCount', '0')
+            videos.append({
+                "video_id": video_id,
+                "title": item['snippet']['title'],
+                "date": item['snippet']['publishedAt'][:10],
+                "views": locale.format_string("%d", int(views), grouping=True)
             })
-            print(f"✅ Transcript for {vid}")
-        except TranscriptsDisabled:
-            print(f"⚠️ No transcript for {vid} (disabled)")
-        except Exception as e:
-            print(f"⚠️ Error for {vid}: {e}")
-        time.sleep(2)
+    return videos
 
-    if not results:
-        return {"status": "no_transcripts"}
+def fetch_transcript(video_id):
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        return "\n".join([x['text'] for x in transcript])
+    except:
+        return None
 
+def save_transcripts_as_docx(videos):
     doc = Document()
-    doc.add_heading("YouTube Transcript", level=1)
-    for video in results:
-        doc.add_heading(video["title"], level=2)
-        doc.add_paragraph(video["url"])
-        for line in video["transcript"]:
-            doc.add_paragraph(f"{line['start']:.2f}s: {line['text']}")
+    for v in videos:
+        doc.add_heading(v['title'], level=1)
+        doc.add_paragraph(f"📅 Uploaded: {v['date']}")
+        doc.add_paragraph(f"👁 Views: {v['views']}")
+        doc.add_paragraph(v['transcript'])
         doc.add_page_break()
 
     filename = f"transcripts_{uuid.uuid4().hex[:8]}.docx"
-    full_path = os.path.join(FILES_DIR, filename)
-    doc.save(full_path)
+    filepath = os.path.join(FILES_DIR, filename)
+    doc.save(filepath)
+    return filename
 
-    print(f"📁 Transcript saved as: {filename}")
+@app.post("/scrape")
+async def scrape(data: ScrapeRequest):
+    channel_id = resolve_channel_id(data.url)
+    if not channel_id:
+        return {"status": "error", "message": "Channel not found"}
+
+    videos = get_videos(channel_id)
+    if not videos:
+        return {"status": "error", "message": "No videos found"}
+
+    transcripts = []
+    for v in videos:
+        text = fetch_transcript(v['video_id'])
+        if text:
+            v['transcript'] = text
+            transcripts.append(v)
+
+    if not transcripts:
+        return {"status": "no_transcripts", "message": "No transcripts available"}
+
+    filename = save_transcripts_as_docx(transcripts)
+
     return {
         "status": "success",
         "file": filename,
-        "count": len(results)
+        "count": len(transcripts)
     }
 
 @app.get("/files/{filename}")
-def serve_file(filename: str):
+async def get_file_status(filename: str):
     path = os.path.join(FILES_DIR, filename)
-    if os.path.exists(path):
-        return {"message": "File ready"}
-    return {"message": "File not found"}
+    if not os.path.isfile(path):
+        return {"message": "File not found"}
+    return {"message": "File found"}
