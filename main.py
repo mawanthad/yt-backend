@@ -5,14 +5,13 @@ import os
 import uuid
 from docx import Document
 import yt_dlp
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import TranscriptsDisabled
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,42 +27,44 @@ class ScrapeRequest(BaseModel):
 async def scrape_transcripts(data: ScrapeRequest):
     input_url = data.url.strip()
 
-    # If it's not a full link, use ytsearch
+    # Use ytsearch for handle or channel
     if not input_url.startswith("http"):
-        search_url = f"ytsearch10:{input_url}"  # fetch top 10 results
-    else:
-        search_url = input_url
+        input_url = f"ytsearch10:{input_url}"
 
     ydl_opts = {
         "quiet": True,
-        "skip_download": True,
         "extract_flat": True,
+        "skip_download": True,
         "force_generic_extractor": False,
-        "dump_single_json": True
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(search_url, download=False)
-            videos = info["entries"] if "entries" in info else [info]
+            info = ydl.extract_info(input_url, download=False)
+            videos = info.get("entries", [])
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Failed to get videos: {str(e)}"}
+
+    if not videos:
+        return {"status": "error", "message": "No videos found from this input."}
 
     results = []
     for video in videos:
         video_id = video.get("id")
         if not video_id:
             continue
+
         try:
             transcript = YouTubeTranscriptApi.get_transcript(video_id)
             results.append({
-                "title": video.get("title", "Untitled"),
-                "url": f"https://youtu.be/{video_id}",
+                "title": video.get("title", "Untitled Video"),
+                "url": f"https://www.youtube.com/watch?v={video_id}",
                 "transcript": transcript
             })
-        except TranscriptsDisabled:
+        except (TranscriptsDisabled, NoTranscriptFound):
             continue
-        except Exception:
+        except Exception as e:
+            print(f"Failed for {video_id}: {e}")
             continue
 
     if not results:
@@ -92,6 +93,6 @@ async def scrape_transcripts(data: ScrapeRequest):
 @app.get("/files/{filename}")
 def serve_file(filename: str):
     path = os.path.join(FILES_DIR, filename)
-    if not os.path.isfile(path):
+    if not os.path.exists(path):
         return {"message": "File not found"}
     return {"message": "File found"}
