@@ -1,18 +1,19 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import os
+from youtube_transcript_api import YouTubeTranscriptApi
+import yt_dlp
 import uuid
+import os
 import time
 from docx import Document
-import yt_dlp
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
 app = FastAPI()
 
+# Enable CORS for frontend access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Update this with your frontend URL for better security
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -26,17 +27,19 @@ class ScrapeRequest(BaseModel):
 
 @app.post("/scrape")
 async def scrape_transcripts(data: ScrapeRequest):
+    print(f"📥 Received URL: {data.url}")
     input_url = data.url.strip()
 
-    # 🟡 Limit to 2 videos to reduce 429 errors
+    # Accept handles like @veritasium directly
     if not input_url.startswith("http"):
         input_url = f"ytsearch2:{input_url}"
+
+    print(f"🔍 Using yt_dlp to fetch videos from: {input_url}")
 
     ydl_opts = {
         "quiet": True,
         "extract_flat": True,
         "skip_download": True,
-        "force_generic_extractor": False,
     }
 
     try:
@@ -44,48 +47,49 @@ async def scrape_transcripts(data: ScrapeRequest):
             info = ydl.extract_info(input_url, download=False)
             videos = info.get("entries", [])
     except Exception as e:
-        return {"status": "error", "message": f"Failed to get videos: {str(e)}"}
+        print(f"❌ yt_dlp error: {str(e)}")
+        return {"status": "error", "message": f"yt_dlp error: {str(e)}"}
 
+    print(f"🎥 Found {len(videos)} videos")
     if not videos:
-        return {"status": "error", "message": "No videos found from this input."}
+        return {"status": "error", "message": "No videos found."}
 
     results = []
-    for video in videos:
-        video_id = video.get("id")
-        if not video_id:
-            continue
+    for video in videos[:3]:  # Limit to 3 videos for speed
+        vid_id = video.get("id")
+        title = video.get("title", "Untitled")
+        print(f"📝 Attempting transcript for: {title} ({vid_id})")
 
         try:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id)
+            transcript = YouTubeTranscriptApi.get_transcript(vid_id)
             results.append({
-                "title": video.get("title", "Untitled Video"),
-                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "title": title,
+                "url": f"https://youtube.com/watch?v={vid_id}",
                 "transcript": transcript
             })
-        except (TranscriptsDisabled, NoTranscriptFound):
-            continue
+            print(f"✅ Transcript retrieved for {vid_id}")
         except Exception as e:
-            print(f"❌ Error fetching transcript for {video_id}: {e}")
-            continue
+            print(f"⚠️ Failed to fetch transcript for {vid_id}: {str(e)}")
 
-        time.sleep(2)  # ⏱️ Add a delay between requests
+        time.sleep(2)
 
     if not results:
+        print("⚠️ No transcripts found.")
         return {"status": "no_transcripts"}
 
     doc = Document()
     doc.add_heading("YouTube Transcript", level=1)
-
     for video in results:
         doc.add_heading(video["title"], level=2)
         doc.add_paragraph(video["url"])
-        for entry in video["transcript"]:
-            doc.add_paragraph(f"{entry['start']:.1f}s: {entry['text']}")
+        for line in video["transcript"]:
+            doc.add_paragraph(f"{line['start']:.2f}s: {line['text']}")
         doc.add_page_break()
 
     filename = f"transcripts_{uuid.uuid4().hex[:8]}.docx"
-    path = os.path.join(FILES_DIR, filename)
-    doc.save(path)
+    full_path = os.path.join(FILES_DIR, filename)
+    doc.save(full_path)
+    print(f"📁 File saved at: {full_path}")
 
     return {
         "status": "success",
@@ -96,6 +100,6 @@ async def scrape_transcripts(data: ScrapeRequest):
 @app.get("/files/{filename}")
 def serve_file(filename: str):
     path = os.path.join(FILES_DIR, filename)
-    if not os.path.exists(path):
+    if not os.path.isfile(path):
         return {"message": "File not found"}
     return {"message": "File found"}
