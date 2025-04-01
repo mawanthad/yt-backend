@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 import uuid
+import time
 from docx import Document
 import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
@@ -27,9 +28,9 @@ class ScrapeRequest(BaseModel):
 async def scrape_transcripts(data: ScrapeRequest):
     input_url = data.url.strip()
 
-    # Use ytsearch for handle or channel
+    # 🟡 Limit to 2 videos to reduce 429 errors
     if not input_url.startswith("http"):
-        input_url = f"ytsearch10:{input_url}"
+        input_url = f"ytsearch2:{input_url}"
 
     ydl_opts = {
         "quiet": True,
@@ -64,8 +65,10 @@ async def scrape_transcripts(data: ScrapeRequest):
         except (TranscriptsDisabled, NoTranscriptFound):
             continue
         except Exception as e:
-            print(f"Failed for {video_id}: {e}")
+            print(f"❌ Error fetching transcript for {video_id}: {e}")
             continue
+
+        time.sleep(2)  # ⏱️ Add a delay between requests
 
     if not results:
         return {"status": "no_transcripts"}
