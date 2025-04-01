@@ -1,17 +1,18 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from youtube_transcript_api import YouTubeTranscriptApi
-import uuid
 import os
+import uuid
 from docx import Document
 import yt_dlp
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import TranscriptsDisabled
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change to your frontend domain for security
+    allow_origins=["*"],  # Adjust for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -23,58 +24,59 @@ os.makedirs(FILES_DIR, exist_ok=True)
 class ScrapeRequest(BaseModel):
     url: str
 
-def get_video_urls_from_channel(channel_url: str, max_videos: int = 5):
-    ydl_opts = {
-        'extract_flat': True,
-        'force_generic_extractor': True,
-        'quiet': True,
-    }
-
-    video_urls = []
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(channel_url, download=False)
-        entries = info.get('entries', [])
-        for entry in entries[:max_videos]:
-            video_urls.append(f"https://www.youtube.com/watch?v={entry['id']}")
-    
-    return video_urls
-
 @app.post("/scrape")
 async def scrape_transcripts(data: ScrapeRequest):
-    channel_url = data.url.strip()
+    input_url = data.url.strip()
+
+    # If it's not a full link, use ytsearch
+    if not input_url.startswith("http"):
+        search_url = f"ytsearch10:{input_url}"  # fetch top 10 results
+    else:
+        search_url = input_url
+
+    ydl_opts = {
+        "quiet": True,
+        "skip_download": True,
+        "extract_flat": True,
+        "force_generic_extractor": False,
+        "dump_single_json": True
+    }
 
     try:
-        video_urls = get_video_urls_from_channel(channel_url)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(search_url, download=False)
+            videos = info["entries"] if "entries" in info else [info]
     except Exception as e:
-        return {"status": "error", "message": f"Failed to fetch videos: {e}"}
+        return {"status": "error", "message": str(e)}
 
-    transcripts = []
-    success_count = 0
-
-    for url in video_urls:
-        video_id = url.split("v=")[-1]
+    results = []
+    for video in videos:
+        video_id = video.get("id")
+        if not video_id:
+            continue
         try:
             transcript = YouTubeTranscriptApi.get_transcript(video_id)
-            transcripts.append({
-                "url": url,
+            results.append({
+                "title": video.get("title", "Untitled"),
+                "url": f"https://youtu.be/{video_id}",
                 "transcript": transcript
             })
-            success_count += 1
-        except:
-            continue  # Skip if transcript isn't available
+        except TranscriptsDisabled:
+            continue
+        except Exception:
+            continue
 
-    if not transcripts:
+    if not results:
         return {"status": "no_transcripts"}
 
-    # Create DOCX
     doc = Document()
-    doc.add_heading("YouTube Channel Transcripts", level=1)
+    doc.add_heading("YouTube Transcript", level=1)
 
-    for video in transcripts:
-        doc.add_heading(f"Video: {video['url']}", level=2)
-        for item in video['transcript']:
-            doc.add_paragraph(f"{item['start']:.2f}s: {item['text']}")
+    for video in results:
+        doc.add_heading(video["title"], level=2)
+        doc.add_paragraph(video["url"])
+        for entry in video["transcript"]:
+            doc.add_paragraph(f"{entry['start']:.1f}s: {entry['text']}")
         doc.add_page_break()
 
     filename = f"transcripts_{uuid.uuid4().hex[:8]}.docx"
@@ -84,7 +86,7 @@ async def scrape_transcripts(data: ScrapeRequest):
     return {
         "status": "success",
         "file": filename,
-        "count": success_count
+        "count": len(results)
     }
 
 @app.get("/files/{filename}")
