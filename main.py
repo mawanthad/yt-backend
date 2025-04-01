@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -11,7 +11,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # or restrict to frontend domain
+    allow_origins=["*"],  # Change to your frontend domain for security
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -23,52 +23,68 @@ os.makedirs(FILES_DIR, exist_ok=True)
 class ScrapeRequest(BaseModel):
     url: str
 
+def get_video_urls_from_channel(channel_url: str, max_videos: int = 5):
+    ydl_opts = {
+        'extract_flat': True,
+        'force_generic_extractor': True,
+        'quiet': True,
+    }
+
+    video_urls = []
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(channel_url, download=False)
+        entries = info.get('entries', [])
+        for entry in entries[:max_videos]:
+            video_urls.append(f"https://www.youtube.com/watch?v={entry['id']}")
+    
+    return video_urls
+
 @app.post("/scrape")
 async def scrape_transcripts(data: ScrapeRequest):
-    url = data.url.strip()
+    channel_url = data.url.strip()
 
-    # Try extracting video URL(s) from channel using yt_dlp
     try:
-        ydl_opts = {
-            'quiet': True,
-            'extract_flat': 'in_playlist',
-            'dump_single_json': True,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-            if "entries" in info and len(info["entries"]) > 0:
-                # It's a channel or playlist: use first video
-                video_id = info["entries"][0]["id"]
-            elif "id" in info:
-                # It's a single video
-                video_id = info["id"]
-            else:
-                return {"status": "error", "message": "Could not extract video from URL."}
+        video_urls = get_video_urls_from_channel(channel_url)
     except Exception as e:
-        return {"status": "error", "message": f"Video extraction failed: {str(e)}"}
+        return {"status": "error", "message": f"Failed to fetch videos: {e}"}
 
-    # Get transcript
-    try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-    except Exception as e:
-        return {"status": "error", "message": f"Transcript fetch failed: {str(e)}"}
+    transcripts = []
+    success_count = 0
 
-    # Save to DOCX
+    for url in video_urls:
+        video_id = url.split("v=")[-1]
+        try:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id)
+            transcripts.append({
+                "url": url,
+                "transcript": transcript
+            })
+            success_count += 1
+        except:
+            continue  # Skip if transcript isn't available
+
+    if not transcripts:
+        return {"status": "no_transcripts"}
+
+    # Create DOCX
     doc = Document()
-    doc.add_heading("YouTube Transcript", level=1)
-    for item in transcript:
-        doc.add_paragraph(f"{item['start']:.2f}s: {item['text']}")
+    doc.add_heading("YouTube Channel Transcripts", level=1)
 
-    filename = f"transcript_{uuid.uuid4().hex[:8]}.docx"
+    for video in transcripts:
+        doc.add_heading(f"Video: {video['url']}", level=2)
+        for item in video['transcript']:
+            doc.add_paragraph(f"{item['start']:.2f}s: {item['text']}")
+        doc.add_page_break()
+
+    filename = f"transcripts_{uuid.uuid4().hex[:8]}.docx"
     path = os.path.join(FILES_DIR, filename)
     doc.save(path)
 
     return {
         "status": "success",
         "file": filename,
-        "count": len(transcript)
+        "count": success_count
     }
 
 @app.get("/files/{filename}")
